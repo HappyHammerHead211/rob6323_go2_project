@@ -165,3 +165,138 @@ The suggested way to inspect these logs is via the Open OnDemand web interface:
 
 ---
 Students should only edit README.md below this line.
+
+# ROB-GY 6323 – Unitree Go2 Locomotion in Isaac Lab
+
+This repository contains the course project for  
+**“Reinforcement Learning and Optimal Control for Autonomous Systems I”**  
+(Prof. Ludovic Righetti, NYU Tandon).
+
+We train a **Unitree Go2** quadruped locomotion policy in **Isaac Lab** using **RSL-RL PPO**, starting from the provided velocity-tracking baseline and progressively adding:
+
+- Action-rate regularization (smooth actions)  
+- Torque-level PD control (custom low-level controller)  
+- Early termination on base height  
+- Raibert-style gait clock and foot-placement shaping  
+- Additional shaping on base orientation, vertical velocity, joint velocity, feet clearance, contact forces, and leg collisions  
+- **Bonus 1:** simple actuator friction model with per-episode randomization
+
+The final policies exhibit smoother torques, more stable base motion, and clearer trotting-like gaits on flat terrain, with an additional friction-robust variant for Bonus 1.
+
+---
+
+## 1. Repository Layout
+
+Main files modified/added for the project:
+
+- `source/rob6323_go2/rob6323_go2/tasks/direct/rob6323_go2/`
+  - `rob6323_go2_env_cfg.py`  
+    Environment configuration (Go2 asset, terrain, sensors, reward scales, PD gains, termination, Bonus 1 friction parameters).
+  - `rob6323_go2_env.py`  
+    Task implementation:
+    - Observation construction (52-dim observation including gait clock)
+    - Torque-level PD control
+    - Reward terms (tracking, action smoothness, orientation, feet clearance, collisions, etc.)
+    - Termination conditions
+    - **Bonus 1:** friction torque computation and per-episode randomization
+
+Training is launched via the standard Isaac Lab / RSL-RL entrypoint for this task (same as in the class template), with log files written under:
+
+- `logs/rsl_rl/go2_flat_direct/...`
+
+---
+
+## 2. Environment and Control
+
+Key environment settings (see `rob6323_go2_env_cfg.py`):
+
+- 4096 parallel environments
+- Physics timestep: `dt = 1/200 s`
+- Control frequency: `50 Hz` (decimation = 4)
+- Flat terrain with friction coefficient 1.0
+- Contact sensor on all robot links, used for feet/contact rewards
+- Action space: 12-D, joint position offsets in `[-1, 1]` scaled by `action_scale = 0.25`
+- Observation space: 52-D
+  - Base linear / angular velocity
+  - Projected gravity
+  - Commanded planar velocities `(v_x, v_y, yaw rate)`
+  - Joint positions/velocities
+  - Previous action
+  - 4-D gait clock
+
+**Custom PD control**
+
+- Desired joint positions = nominal stance + scaled action
+- PD torque: `tau = Kp * (q_des - q) - Kd * qd`
+- Gains: `Kp = 20.0`, `Kd = 0.5`
+- Torque limits: `±23.5 Nm`
+- Built-in actuator stiffness/damping is disabled via `ImplicitActuatorCfg`.
+
+---
+
+## 3. Reward Design
+
+The total reward is a weighted sum of the following terms (all implemented in `rob6323_go2_env.py` and configured via `rob6323_go2_env_cfg.py`):
+
+### 3.1 Command Tracking
+
+- Linear velocity tracking in the XY plane  
+  - Weighted by `lin_vel_reward_scale = 1.0`
+  - Logged as `Episode_Reward/track_lin_vel_xy_exp`
+- Yaw-rate tracking  
+  - Weighted by `yaw_rate_reward_scale = 0.5`
+  - Logged as `Episode_Reward/track_ang_vel_z_exp`
+
+### 3.2 Action Smoothness and Torque Regularization
+
+- Action-rate penalty on successive actions (first and second differences)  
+  - Weighted by `action_rate_reward_scale = -0.01`
+- Torque L2 penalty on joint torques  
+  - Weighted by `torque_l2_reward_scale = -1e-5`
+
+These terms encourage smooth, low-frequency control signals without overwhelming the tracking rewards.
+
+### 3.3 Gait and Posture Shaping
+
+- **Raibert heuristic** (`raibert_heuristic_reward_scale = -1.0`)  
+  Penalizes deviation between actual foot positions and Raibert-style desired foot placements given gait phase and command.
+- **Orientation penalty** (`orient_reward_scale = -1.0`)  
+  Encourages a level base (small roll/pitch).
+- **Vertical velocity penalty** (`lin_vel_z_reward_scale = -0.02`)  
+  Reduces bouncing in the base height.
+- **Joint velocity penalty** (`dof_vel_reward_scale = -2e-5`)
+- **Roll/pitch rate penalty** (`ang_vel_xy_reward_scale = -0.001`)
+
+### 3.4 Feet Clearance, Contacts, and Leg Collisions
+
+- **Feet clearance** (`feet_clearance_reward_scale = -10.0`)  
+  Penalizes feet that are too low during swing phase (encourages consistent swing height).
+- **Contact forces** (`tracking_contacts_shaped_force_reward_scale = 2.0`)  
+  Shaped reward that prefers appropriate contact timing and magnitude.
+- **Leg collisions**  
+  - Penalty `leg_collision_reward_scale = -1.0` applied when hip/thigh/calf links see large contact forces.
+  - Shaping denominator `leg_collision_force_denom = 100.0` controls sensitivity.
+  - Optional early termination switches:
+    - `terminate_on_leg_collision`
+    - `leg_collision_force_threshold`
+    - `leg_collision_consecutive_steps`
+
+---
+
+## 4. Bonus 1: Actuator Friction with Randomization
+
+Bonus 1 adds a simple actuator friction model to make joint dynamics more realistic and to test robustness of the learned gait.
+
+### 4.1 Configuration Parameters
+
+In `rob6323_go2_env_cfg.py`:
+
+```python
+# Bonus 1: actuator friction parameters
+enable_actuator_friction = True
+
+# Randomization ranges (sampled per environment at reset)
+f_s_min = 0.0   # static friction min
+f_s_max = 2.5   # static friction max
+mu_v_min = 0.0  # viscous friction min
+mu_v_max = 0.3  # viscous friction max
