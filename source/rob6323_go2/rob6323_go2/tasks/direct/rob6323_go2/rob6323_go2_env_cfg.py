@@ -37,7 +37,7 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
 
     # ---------------- Bonus 1: actuator friction params ----------------
     # enable friction model
-    enable_actuator_friction = True
+    enable_actuator_friction = False
     # stiction coefficient range F_s ~ U(f_s_min, f_s_max)
     f_s_min = 0.0
     f_s_max = 2.5
